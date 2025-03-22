@@ -50,6 +50,8 @@ async def send_group_msg(
     sleep_time = random.uniform(0.5, 1.5)  # 随机休眠时间
     await asyncio.sleep(sleep_time)
     
+    print(f"发送给群{group_id}的消息：{message}")
+    
     await call_api(ws, "send_group_msg", {
         "group_id": group_id,
         "message": message 
@@ -63,6 +65,8 @@ async def handle_group_increase(
     """处理加群事件"""
     user_id = event["user_id"]
     group_id = event["group_id"]
+    
+    print(f"用户{user_id}加入群{group_id}")
     
     white_list = await db.get_white_list()
     if group_id not in white_list:
@@ -138,6 +142,8 @@ async def handle_group_msg(
     if not message:
         return
     
+    print(f"收到群{group_id}的消息：{message}")
+    
     if user_id in config.master_list:
         if message.startswith("加群验证白名单"):
             args = message.split()
@@ -181,6 +187,7 @@ async def websocket_client():
     await db.init_db()
     
     async with aiohttp.ClientSession() as session:
+        print(f"连接到WebSocket服务器：{config.ws_url}")
         async with session.ws_connect(config.ws_url) as ws:
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
