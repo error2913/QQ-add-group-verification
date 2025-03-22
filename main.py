@@ -181,37 +181,60 @@ async def handle_group_msg(
         verification_pool[key]["task"].cancel()
         del verification_pool[key]
         await send_group_msg(ws, group_id, f"验证成功，欢迎加入本群！")
+        
+async def handle_data(
+    msg: aiohttp.WSMessage,
+    ws: aiohttp.ClientWebSocketResponse
+):
+    """处理服务器发送的数据"""
+    try:
+        data = json.loads(msg.data)
+        
+        # 处理API响应
+        if "echo" in data:
+            if future := echo_map.get(data["echo"]):
+                future.set_result(data)
+            return
+        
+        # 处理事件
+        if data.get("post_type") == "notice":
+            if data["notice_type"] == "group_increase":
+                asyncio.create_task(handle_group_increase(data, ws))
+        elif data.get("post_type") == "message":
+            if data["message_type"] == "group":
+                asyncio.create_task(handle_group_msg(data, ws))
+    except Exception as e:
+        print(f"处理消息出错: {e}")
 
 async def websocket_client():
     """主WebSocket客户端"""
-    await db.init_db()
-    
     async with aiohttp.ClientSession() as session:
-        print(f"连接到WebSocket服务器：{config.ws_url}")
-        async with session.ws_connect(config.ws_url) as ws:
-            async for msg in ws:
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
+        retry = 0
+        while True:
+            try:
+                retry += 1
+                print(f"尝试连接到WebSocket服务器：{config.ws_url}({retry}/5)")
+
+                async with session.ws_connect(config.ws_url) as ws:
+                    retry = 0  # 连接成功后重置重试次数
+                    print("WebSocket连接成功")
+                    
+                    async for msg in ws:
+                        if msg.type != aiohttp.WSMsgType.TEXT:
+                            continue
+                        asyncio.create_task(handle_data(msg, ws))
+            except Exception as e:
+                print(f"WebSocket连接出错: {e}，30秒后重试")
+                await asyncio.sleep(30)  # 连接失败后等待30秒后重试
                 
-                try:
-                    data = json.loads(msg.data)
-                    
-                    # 处理API响应
-                    if "echo" in data:
-                        if future := echo_map.get(data["echo"]):
-                            future.set_result(data)
-                        continue
-                    
-                    # 处理事件
-                    if data.get("post_type") == "notice":
-                        if data["notice_type"] == "group_increase":
-                            asyncio.create_task(handle_group_increase(data, ws))
-                    elif data.get("post_type") == "message":
-                        if data["message_type"] == "group":
-                            asyncio.create_task(handle_group_msg(data, ws))
-                            
-                except Exception as e:
-                    print(f"处理消息出错: {e}")
+                if retry >= 5:
+                    print("WebSocket连接失败，已达到最大重试次数，程序将退出")
+                    raise ConnectionError("WebSocket连接失败")
+                
+async def main():
+    """主函数"""
+    await db.init_db()
+    await websocket_client()
 
 if __name__ == "__main__":
-    asyncio.run(websocket_client())
+    asyncio.run(main())
