@@ -4,8 +4,17 @@ import asyncio
 import json
 import uuid
 import random
-from config.config import config
-from data.database import Database
+from config import config
+from data import Database
+import logging
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 # 定义验证信息的类型
 class VerificationData(TypedDict):
@@ -50,7 +59,7 @@ async def send_group_msg(
     sleep_time = random.uniform(0.5, 1.5)  # 随机休眠时间
     await asyncio.sleep(sleep_time)
     
-    print(f"发送给群{group_id}的消息：{message}")
+    logger.info(f"发送给群{group_id}的消息：{message}")
     
     await call_api(ws, "send_group_msg", {
         "group_id": group_id,
@@ -66,7 +75,7 @@ async def handle_group_increase(
     user_id = event["user_id"]
     group_id = event["group_id"]
     
-    print(f"用户{user_id}加入群{group_id}")
+    logger.info(f"用户{user_id}加入群{group_id}")
     
     white_list = await db.get_white_list()
     if group_id not in white_list:
@@ -75,33 +84,36 @@ async def handle_group_increase(
     # 获取用户信息
     response = await call_api(ws, "get_stranger_info", {"user_id": user_id})
     if not response or response.get("retcode") != 0:
-        print(f"获取用户{user_id}信息失败")
+        logger.error(f"获取用户{user_id}信息失败")
         return
     
     qq_level = response["data"].get("qqLevel", 0)
-    if qq_level >= config.level_threshold:
+    threshold = await db.get_threshold(group_id)
+    if qq_level >= threshold:
         return  # 等级达标不需要验证
 
     # 生成并保存验证码
     verify_code = generate_code()
     key = (user_id, group_id)
+    timeout = await db.get_timeout(group_id)
     verification_pool[key] = {
         "code": verify_code,
-        "task": asyncio.create_task(kick_task(ws, user_id, group_id))
+        "task": asyncio.create_task(kick_task(ws, user_id, group_id, timeout))
     }
 
     # 发送验证消息
     await send_group_msg(ws, group_id,
-        f"[CQ:at,qq={user_id}] 欢迎加入！你当前的QQ等级为 {qq_level}，等级过低。请在时限发送验证码：{verify_code}（{config.verify_timeout}秒内有效），否则将移出本群。")
+        f"[CQ:at,qq={user_id}] 欢迎加入！你当前的QQ等级为 {qq_level}，等级过低。请在时限发送验证码：{verify_code}（{timeout}秒内有效），否则将移出本群。")
 
 async def kick_task(
     ws: aiohttp.ClientWebSocketResponse,
     user_id: int,
-    group_id: int
+    group_id: int,
+    timeout: int
 ):
     """超时踢出任务"""
     try:
-        await asyncio.sleep(config.verify_timeout)
+        await asyncio.sleep(timeout)
         key = (user_id, group_id)
         if key in verification_pool:
             await call_api(ws, "set_group_kick", {
@@ -142,26 +154,48 @@ async def handle_group_msg(
     if not message:
         return
     
-    print(f"收到群{group_id}的消息：{message}")
+    logger.info(f"收到群{group_id}的消息：{message}")
     
     if user_id in config.master_list:
         if message.startswith("加群验证白名单"):
             args = message.split()
             if len(args) < 2:
-                await send_group_msg(ws, group_id, "请提供正确的命令格式：加群验证白名单 [添加/移除/查看] (群号)")
+                await send_group_msg(ws, group_id, "请提供正确的命令格式：\n加群验证白名单 [添加/移除/查看] <群号>(可选)\n加群验证白名单 阈值 <数字>\n加群验证白名单 时限 <数字>")
                 return
 
-            action, group_id_str = args[1], args[2] if len(args) > 2 else group_id
+            action, arg = args[1], args[2] if len(args) > 2 else group_id
             
             if action == "添加":
-                success = await db.add_group(int(group_id_str))
-                await send_group_msg(ws, group_id, f"已将群{group_id_str}添加到白名单" if success else "添加失败")
+                success = await db.add_group(int(arg))
+                await send_group_msg(ws, group_id, f"已将群{arg}添加到白名单" if success else "添加失败")
             elif action == "移除":
-                success = await db.remove_group(int(group_id_str))
-                await send_group_msg(ws, group_id, f"已将群{group_id_str}从白名单移除" if success else "移除失败")
+                success = await db.remove_group(int(arg))
+                await send_group_msg(ws, group_id, f"已将群{arg}从白名单移除" if success else "移除失败")
             elif action == "查看":
                 white_list = await db.get_white_list()
-                await send_group_msg(ws, group_id, f"当前白名单群：{', '.join(map(str, white_list))}")
+                await send_group_msg(ws, group_id, f"当前白名单群：{', '.join(map(str, white_list))}" if white_list else "白名单为空")
+            elif action == "阈值":
+                if len(args) < 3:
+                    threshold = await db.get_threshold(int(arg))
+                    await send_group_msg(ws, group_id, f"群{arg}的阈值为：{threshold}")
+                else:
+                    try:
+                        new_threshold = int(arg)
+                        success = await db.set_threshold(group_id, new_threshold)
+                        await send_group_msg(ws, group_id, f"已将群{group_id}的阈值设置为：{new_threshold}" if success else "设置失败")
+                    except ValueError:
+                        await send_group_msg(ws, group_id, "请提供有效的阈值数字")
+            elif action == "时限":
+                if len(args) < 3:
+                    timeout = await db.get_timeout(int(arg))
+                    await send_group_msg(ws, group_id, f"群{arg}的验证时限为：{timeout}秒")
+                else:
+                    try:
+                        new_timeout = int(arg)
+                        success = await db.set_timeout(group_id, new_timeout)
+                        await send_group_msg(ws, group_id, f"已将群{group_id}的验证时限设置为：{new_timeout}秒" if success else "设置失败")
+                    except ValueError:
+                        await send_group_msg(ws, group_id, "请提供有效的时限数字")
             else:
                 await send_group_msg(ws, group_id, "请提供正确的操作：添加/移除")
                 
@@ -204,7 +238,7 @@ async def handle_data(
             if data["message_type"] == "group":
                 asyncio.create_task(handle_group_msg(data, ws))
     except Exception as e:
-        print(f"处理消息出错: {e}")
+        logger.error(f"处理消息出错: {e}")
 
 async def websocket_client():
     """主WebSocket客户端"""
@@ -213,22 +247,22 @@ async def websocket_client():
         while True:
             try:
                 retry += 1
-                print(f"尝试连接到WebSocket服务器：{config.ws_url}({retry}/5)")
+                logger.info(f"尝试连接到WebSocket服务器：{config.ws_url}({retry}/5)")
 
                 async with session.ws_connect(config.ws_url) as ws:
                     retry = 0  # 连接成功后重置重试次数
-                    print("WebSocket连接成功")
+                    logger.info("WebSocket连接成功")
                     
                     async for msg in ws:
                         if msg.type != aiohttp.WSMsgType.TEXT:
                             continue
                         asyncio.create_task(handle_data(msg, ws))
             except Exception as e:
-                print(f"WebSocket连接出错: {e}，30秒后重试")
+                logger.warning(f"WebSocket连接出错: {e}，30秒后重试")
                 await asyncio.sleep(30)  # 连接失败后等待30秒后重试
                 
                 if retry >= 5:
-                    print("WebSocket连接失败，已达到最大重试次数，程序将退出")
+                    logger.error("WebSocket连接失败，已达到最大重试次数，程序将退出")
                     raise ConnectionError("WebSocket连接失败")
                 
 async def main():

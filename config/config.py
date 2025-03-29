@@ -1,5 +1,8 @@
 import json
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 获取当前模块所在目录
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,7 +34,7 @@ class Config:
                 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                     self._config.update(json.load(f))
             except (json.JSONDecodeError, IOError) as e:
-                print(f"配置文件加载失败，使用默认配置: {str(e)}")
+                logger.error(f"配置文件加载失败，使用默认配置: {str(e)}")
                 self._config = DEFAULT_CONFIG.copy()
                 self._save_config()
     
@@ -41,7 +44,7 @@ class Config:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, indent=2)
         except IOError as e:
-            print(f"配置文件保存失败: {str(e)}")
+            logger.error(f"配置文件保存失败: {str(e)}")
     
     @property
     def level_threshold(self) -> int:
